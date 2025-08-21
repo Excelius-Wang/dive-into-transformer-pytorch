@@ -1,43 +1,136 @@
+"""
+主程序入口，用于启动训练、评估或推理过程。
+"""
 import argparse
+import os
 import sys
 import torch
-from src.config.config import TransformerConfig
-from src.data_loader.dataset import TextDataset
-from src.models.language_model import GPTLanguageModel
-from src.training.trainer import ModelTrainer
-from src.generate.generator import TextGenerator
-from src.utils.logger import printlog
+import random
+import numpy as np
+from pathlib import Path
+
+# 导入配置
+from src.config.model_config import MODEL_CONFIGS
+
+
+def set_seed(seed):
+    """设置随机种子以确保可重复性"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 
 def parse_args():
-    """解析命令行参数
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description="深度学习项目命令行工具")
     
-    Returns:
-        解析后的参数
+    # 基本参数
+    parser.add_argument("--mode", type=str, default="train", 
+                        choices=["train", "eval", "predict", "generate"],
+                        help="运行模式")
+    parser.add_argument("--config", type=str, default="classification",
+                        help="配置名称或配置文件路径")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="模型检查点路径")
+    
+    # 数据相关参数
+    parser.add_argument("--data_path", type=str, default=None,
+                        help="数据路径")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="输出目录")
+    
+    # 训练相关参数
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="训练轮数")
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="批量大小")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="学习率")
+    
+    # 其他参数
+    parser.add_argument("--gpu", type=str, default=None,
+                        help="GPU ID，例如'0'或'0,1,2'")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="随机种子")
+    parser.add_argument("--debug", action="store_true",
+                        help="启用调试模式")
+    
+    return parser.parse_args()
+
+
+def load_config(config_name_or_path):
     """
-    parser = argparse.ArgumentParser(description='Transformer语言模型训练与生成')
+    加载配置
     
-    # 检查是否有命令行参数
-    if len(sys.argv) <= 1:
-        printlog("未提供命令行参数，默认使用训练模式")
-        sys.argv.append('--train')
+    参数:
+        config_name_or_path: 配置名称或配置文件路径
+        
+    返回:
+        配置字典
+    """
+    # 如果是配置名称
+    if config_name_or_path in MODEL_CONFIGS:
+        return MODEL_CONFIGS[config_name_or_path]
     
-    # 主要操作模式
-    mode_group = parser.add_mutually_exclusive_group(required=False)
-    mode_group.add_argument('--train', action='store_true', help='训练模型')
-    mode_group.add_argument('--generate', action='store_true', help='生成文本')
+    # 如果是配置文件路径
+    if os.path.exists(config_name_or_path):
+        # TODO: 从文件加载配置
+        pass
     
-    # 生成参数
-    parser.add_argument('--context', type=str, default=None, help='生成文本的上下文')
-    parser.add_argument('--max_tokens', type=int, default=None, help='生成的最大token数')
+    # 默认使用分类配置
+    print(f"未找到配置'{config_name_or_path}'，使用默认分类配置")
+    return MODEL_CONFIGS["classification"]
+
+
+def update_config_with_args(config, args):
+    """
+    使用命令行参数更新配置
     
-    args = parser.parse_args()
+    参数:
+        config: 配置字典
+        args: 命令行参数
+        
+    返回:
+        更新后的配置字典
+    """
+    # 更新训练参数
+    if args.epochs is not None:
+        config["training"]["epochs"] = args.epochs
     
-    # 如果没有指定模式，默认为训练模式
-    if not (args.train or args.generate):
-        args.train = True
-        printlog("未指定模式，默认使用训练模式")
+    if args.batch_size is not None:
+        config["data"]["batch_size"] = args.batch_size
     
-    return args
+    if args.lr is not None:
+        config["training"]["lr"] = args.lr
+    
+    # 更新硬件配置
+    if args.gpu is not None:
+        gpu_ids = [int(x) for x in args.gpu.split(",")]
+        config["hardware"]["gpu_ids"] = gpu_ids
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    
+    # 更新其他参数
+    if args.seed is not None:
+        config["seed"] = args.seed
+    
+    if args.debug:
+        config["debug"] = True
+    
+    # 更新路径参数
+    if args.data_path is not None:
+        config["data"]["raw_dir"] = args.data_path
+    
+    if args.output_dir is not None:
+        config["checkpoints"]["save_dir"] = os.path.join(args.output_dir, "checkpoints")
+        config["logging"]["log_dir"] = os.path.join(args.output_dir, "logs")
+    
+    return config
+
 
 def main():
     """主函数"""
@@ -45,44 +138,42 @@ def main():
     args = parse_args()
     
     # 加载配置
-    config = TransformerConfig()
+    config = load_config(args.config)
     
-    # 设置配置
-    if args.max_tokens is not None:
-        config.MAX_NEW_TOKENS = args.max_tokens
+    # 使用命令行参数更新配置
+    config = update_config_with_args(config, args)
     
-    # 创建数据集
-    printlog("加载数据集...")
-    dataset = TextDataset(config)
+    # 设置随机种子
+    set_seed(config["seed"])
     
-    # 创建模型
-    printlog("创建模型...")
-    model = GPTLanguageModel(dataset.vocab_size, config).to(config.DEVICE)
+    # 确保必要的目录存在
+    os.makedirs(config["checkpoints"]["save_dir"], exist_ok=True)
+    os.makedirs(config["logging"]["log_dir"], exist_ok=True)
     
-    if args.train:
-        # 训练模式
-        printlog("开始训练模型...")
-        trainer = ModelTrainer(model, dataset, config)
-        model = trainer.train()
-        printlog("训练完成!")
-        
-    elif args.generate:
-        # 生成模式
-        printlog("初始化生成器...")
-        generator = TextGenerator(model, dataset, config)
-        
-        if args.context:
-            # 使用用户提供的上下文
-            printlog("使用提供的上下文生成文本...")
-            context_text = args.context
-            generated_text = generator.generate_from_text(context_text)
-            # 只显示新生成的部分（不包含原始上下文）
-            generator.print_generation_result(generated_text[len(context_text):], context_text)
-        else:
-            # 使用随机上下文
-            printlog("使用随机上下文生成文本...")
-            generated_text = generator.generate_random_completion()
-            generator.print_generation_result(generated_text)
+    # 根据模式执行相应操作
+    if args.mode == "train":
+        # 导入训练模块
+        from src.train import train
+        train(config)
+    
+    elif args.mode == "eval":
+        # 导入评估模块
+        from src.inference import evaluate
+        evaluate(config, args.checkpoint)
+    
+    elif args.mode == "predict":
+        # 导入预测模块
+        from src.inference import predict
+        predict(config, args.checkpoint, args.data_path)
+    
+    elif args.mode == "generate":
+        # 导入生成模块
+        from src.generate.generator import generate
+        generate(config, args.checkpoint, args.data_path)
+    
+    else:
+        print(f"不支持的模式: {args.mode}")
+
 
 if __name__ == "__main__":
     main() 
